@@ -94,10 +94,48 @@ function wireSettings(adText) {
 
 const clientId = getClientId();
 let tokens = loadTokens();
+let reloginInProgress = false;
+
+async function startReloginFlow() {
+  if (reloginInProgress) return;
+  reloginInProgress = true;
+  console.log(new Date().toISOString(), "Session expired. Starting re-login flow...");
+  try {
+    const startRes = await safeFetch(`${BASE}/v1/auth/extension/start`, { redirect: "manual" });
+    const loc = startRes?.headers?.get("location");
+    if (!loc) { reloginInProgress = false; return; }
+    const state = new URL(loc).searchParams.get("state");
+    console.log("\n=== ACTION REQUIRED ===");
+    console.log("Open this URL to sign back in:\n" + loc);
+    console.log("=======================\n");
+    // Try to open browser (Linux / WSL)
+    try { (await import("node:child_process")).execSync(`xdg-open '${loc}' 2>/dev/null`); } catch {
+      try { (await import("node:child_process")).execSync(`cmd.exe /c start '${loc}' 2>/dev/null`); } catch {}
+    }
+    // Poll for up to 5 minutes
+    for (let i = 0; i < 100; i++) {
+      await new Promise(r => setTimeout(r, 3000));
+      const r = await safeFetch(`${BASE}/v1/auth/extension/poll?state=${encodeURIComponent(state)}`);
+      if (r?.ok) {
+        const j = await r.json().catch(() => ({}));
+        if (j.access_token) {
+          tokens = { access_token: j.access_token, refresh_token: j.refresh_token ?? null };
+          saveTokens(tokens);
+          console.log(new Date().toISOString(), "Re-login successful. Resuming...");
+          reloginInProgress = false;
+          return;
+        }
+      }
+    }
+    console.log(new Date().toISOString(), "Re-login timed out. Will retry next cycle.");
+  } catch (e) { console.error("Re-login error:", e.message); }
+  reloginInProgress = false;
+}
 
 if (!tokens?.access_token) {
-  console.error("Not signed in. Run:  node ~/.vibe-ads/kickbacks-login.mjs");
-  process.exit(1);
+  console.log("No tokens found — starting first-time login...");
+  await startReloginFlow();
+  if (!tokens?.access_token) process.exit(1);
 }
 
 async function tick() {
@@ -110,9 +148,15 @@ async function tick() {
   let portfolio = await fetchPortfolio(tokens.access_token);
   if (portfolio?.expired) {
     console.log(new Date().toISOString(), "Token expired — refreshing...");
-    const fresh = await refreshAccessToken(tokens.refresh_token);
-    if (fresh?.access_token) { tokens = { ...tokens, ...fresh }; saveTokens(tokens); }
-    portfolio = await fetchPortfolio(tokens.access_token);
+    const fresh = tokens.refresh_token ? await refreshAccessToken(tokens.refresh_token) : null;
+    if (fresh?.access_token) {
+      tokens = { ...tokens, ...fresh }; saveTokens(tokens);
+      portfolio = await fetchPortfolio(tokens.access_token);
+    } else {
+      // Refresh token itself is dead — trigger full re-login
+      startReloginFlow();
+      return;
+    }
   }
   const raw = portfolio?.ads?.[0];
   if (!raw?.title_text) { console.log(new Date().toISOString(), "No ad available"); return; }
