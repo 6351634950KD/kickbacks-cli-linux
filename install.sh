@@ -69,7 +69,8 @@ WantedBy=default.target
 SERVICE
   systemctl --user daemon-reload
   systemctl --user enable kickbacks.service
-  echo "[✓] systemd service installed & enabled"
+  loginctl enable-linger "$USER" 2>/dev/null || true
+  echo "[✓] systemd service installed & enabled (auto-start on boot)"
 else
   BASHRC="$HOME/.bashrc"
   if ! grep -q "kickbacks-daemon" "$BASHRC" 2>/dev/null; then
