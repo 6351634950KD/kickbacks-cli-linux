@@ -239,7 +239,7 @@ async function tick() {
 
 // Random active session lengths and rest durations to mimic real usage patterns
 const SESSION_MINS = [5, 7, 10, 15, 30, 60];
-const REST_MINS    = [2, 3, 5, 8];
+const REST_MINS    = [1, 2, 3, 4, 5, 6];
 
 function randPick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
