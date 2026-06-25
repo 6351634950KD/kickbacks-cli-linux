@@ -237,6 +237,32 @@ async function tick() {
   }
 }
 
-console.log("Kickbacks daemon running (poll every", POLL_MS / 1000, "s, concurrent cycles skipped)");
-tick().catch(console.error);
-setInterval(() => tick().catch(console.error), POLL_MS);
+// Random active session lengths and rest durations to mimic real usage patterns
+const SESSION_MINS = [5, 7, 10, 15, 30, 60];
+const REST_MINS    = [2, 3, 5, 8];
+
+function randPick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function runSessionLoop() {
+  while (true) {
+    const sessionMs = randPick(SESSION_MINS) * 60_000;
+    const restMs    = randPick(REST_MINS) * 60_000;
+    const sessionEnd = Date.now() + sessionMs;
+
+    console.log(new Date().toISOString(),
+      `Session started — active for ${sessionMs/60000} min, then rest ${restMs/60000} min`);
+
+    while (Date.now() < sessionEnd) {
+      await tick().catch(console.error);
+      await sleep(POLL_MS);
+    }
+
+    console.log(new Date().toISOString(),
+      `Session ended — resting ${restMs/60000} min`);
+    await sleep(restMs);
+  }
+}
+
+console.log("Kickbacks daemon running (random sessions)");
+runSessionLoop();
