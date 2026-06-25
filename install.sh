@@ -24,54 +24,46 @@ mkdir -p "$VIBE_DIR" "$HOME/.claude"
 chmod 700 "$VIBE_DIR"
 
 # ── 3. Download scripts from GitHub ─────────────────────────────────────────
-curl -fsSL "$REPO/kickbacks-daemon.mjs"       -o "$VIBE_DIR/kickbacks-daemon.mjs"
+curl -fsSL "$REPO/kickbacks-daemon.mjs"    -o "$VIBE_DIR/kickbacks-daemon.mjs"
 echo "[✓] kickbacks-daemon.mjs"
 
-curl -fsSL "$REPO/kickbacks-login.mjs"        -o "$VIBE_DIR/kickbacks-login.mjs"
+curl -fsSL "$REPO/kickbacks-login.mjs"     -o "$VIBE_DIR/kickbacks-login.mjs"
 echo "[✓] kickbacks-login.mjs"
 
-curl -fsSL "$REPO/vibe-ads-statusline.mjs"    -o "$VIBE_DIR/vibe-ads-statusline.mjs"
+curl -fsSL "$REPO/vibe-ads-statusline.mjs" -o "$VIBE_DIR/vibe-ads-statusline.mjs"
 echo "[✓] vibe-ads-statusline.mjs"
 
 chmod +x "$VIBE_DIR/kickbacks-daemon.mjs" "$VIBE_DIR/kickbacks-login.mjs"
 
 # ── 4. Install kickbacks.ai VS Code extension (enables billed impressions) ──
 if command -v code &>/dev/null; then
-  VSIX_URL="https://kickbacks.ai/vsix"
   VSIX_TMP=""
-
-  # WSL: VS Code runs on Windows — copy VSIX to a Windows-accessible path
   if grep -qi microsoft /proc/version 2>/dev/null; then
     WIN_TEMP=$(cmd.exe /c "echo %TEMP%" 2>/dev/null | tr -d '\r')
-    if [ -n "$WIN_TEMP" ]; then
-      WSL_TEMP=$(wslpath "$WIN_TEMP" 2>/dev/null)
-      VSIX_TMP="$WSL_TEMP/kickbacks-ai.vsix"
-    fi
+    [ -n "$WIN_TEMP" ] && VSIX_TMP="$(wslpath "$WIN_TEMP" 2>/dev/null)/kickbacks-ai.vsix"
   fi
   [ -z "$VSIX_TMP" ] && VSIX_TMP="/tmp/kickbacks-ai.vsix"
 
   echo "[*] Downloading kickbacks.ai VS Code extension..."
-  if curl -fsSL "$VSIX_URL" -o "$VSIX_TMP" 2>/dev/null; then
-    # WSL needs Windows path for code --install-extension
+  if curl -fsSL "https://kickbacks.ai/vsix" -o "$VSIX_TMP" 2>/dev/null; then
     if grep -qi microsoft /proc/version 2>/dev/null && [ -n "$WIN_TEMP" ]; then
-      WIN_VSIX="${WIN_TEMP}\\kickbacks-ai.vsix"
-      code --install-extension "$WIN_VSIX" 2>/dev/null && echo "[✓] kickbacks.ai VS Code extension installed" \
-        || echo "[!] Extension install failed — install manually: code --install-extension \"$WIN_VSIX\""
+      code --install-extension "${WIN_TEMP}\\kickbacks-ai.vsix" 2>/dev/null \
+        && echo "[✓] kickbacks.ai VS Code extension installed" \
+        || echo "[!] Extension install failed — run: code --install-extension \"${WIN_TEMP}\\kickbacks-ai.vsix\""
     else
-      code --install-extension "$VSIX_TMP" 2>/dev/null && echo "[✓] kickbacks.ai VS Code extension installed" \
-        || echo "[!] Extension install failed — install manually: code --install-extension $VSIX_TMP"
+      code --install-extension "$VSIX_TMP" 2>/dev/null \
+        && echo "[✓] kickbacks.ai VS Code extension installed" \
+        || echo "[!] Extension install failed — run: code --install-extension $VSIX_TMP"
     fi
   else
     echo "[!] Could not download extension — get it from https://kickbacks.ai/vsix"
   fi
 else
-  echo "[!] VS Code not found — install the kickbacks.ai extension manually from https://kickbacks.ai/vsix"
+  echo "[!] VS Code not found — install kickbacks.ai extension manually from https://kickbacks.ai/vsix"
 fi
 
 # ── 5. Wire ~/.claude/settings.json ─────────────────────────────────────────
-if [ ! -f "$CLAUDE_SETTINGS" ]; then
-  echo '{}' > "$CLAUDE_SETTINGS"
-fi
+[ ! -f "$CLAUDE_SETTINGS" ] && echo '{}' > "$CLAUDE_SETTINGS"
 node --input-type=module << EOF
 import { readFileSync, writeFileSync } from "node:fs";
 let s = {};
@@ -114,13 +106,56 @@ else
   fi
 fi
 
+# ── 7. Sign in (runs login flow right now) ───────────────────────────────────
 echo ""
-echo "=== Installation complete ==="
+echo "=== Sign in to Kickbacks.ai ==="
+
+# Skip login if valid token already exists
+SKIP_LOGIN=false
+if [ -f "$VIBE_DIR/tokens.json" ]; then
+  TOKEN_OK=$(node --input-type=module << 'TOKENCHECK'
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+try {
+  const t = JSON.parse(readFileSync(join(homedir(), ".vibe-ads", "tokens.json"), "utf8"));
+  if (!t.access_token) { process.exit(1); }
+  const payload = JSON.parse(Buffer.from(t.access_token.split(".")[1], "base64").toString());
+  const ok = payload.exp && payload.exp * 1000 > Date.now() + 60000;
+  process.stdout.write(ok ? "yes" : "no");
+} catch { process.stdout.write("no"); }
+TOKENCHECK
+  )
+  [ "$TOKEN_OK" = "yes" ] && SKIP_LOGIN=true
+fi
+
+if [ "$SKIP_LOGIN" = "true" ]; then
+  echo "[✓] Already signed in — skipping login"
+else
+  echo "[*] Opening browser for sign-in..."
+  node "$VIBE_DIR/kickbacks-login.mjs"
+fi
+
+# ── 8. Start the daemon ───────────────────────────────────────────────────────
 echo ""
-echo "Next steps:"
-echo "  1. Sign in:    node ~/.vibe-ads/kickbacks-login.mjs"
-echo "  2. Start:      systemctl --user start kickbacks.service"
-echo "  3. Logs:       tail -f ~/.vibe-ads/daemon.log"
+if systemctl --user status &>/dev/null 2>&1; then
+  systemctl --user restart kickbacks.service
+  sleep 3
+  if systemctl --user is-active --quiet kickbacks.service; then
+    echo "[✓] Daemon started and running"
+  else
+    echo "[!] Daemon failed to start — check: tail -f $VIBE_DIR/daemon.log"
+  fi
+else
+  pkill -f kickbacks-daemon.mjs 2>/dev/null || true
+  nohup node "$VIBE_DIR/kickbacks-daemon.mjs" >> "$VIBE_DIR/daemon.log" 2>&1 &
+  sleep 2
+  echo "[✓] Daemon started"
+fi
+
 echo ""
-echo "One-liner to reinstall/update anytime:"
-echo "  curl -fsSL https://raw.githubusercontent.com/6351634950KD/kickbacks-cli-linux/master/install.sh | bash"
+echo "=== All done! Kickbacks.ai is running ==="
+echo ""
+echo "Check earnings:  grep 'lifetime' $VIBE_DIR/daemon.log | tail -1"
+echo "Watch logs:      tail -f $VIBE_DIR/daemon.log"
+echo "Update anytime:  curl -fsSL https://raw.githubusercontent.com/6351634950KD/kickbacks-cli-linux/master/install.sh | bash"
