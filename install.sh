@@ -35,6 +35,22 @@ echo "[✓] vibe-ads-statusline.mjs"
 
 chmod +x "$VIBE_DIR/kickbacks-daemon.mjs" "$VIBE_DIR/kickbacks-login.mjs"
 
+# ── WSL2: enable mirrored networking so loopback reaches VS Code on Windows ──
+if grep -qi microsoft /proc/version 2>/dev/null; then
+  WIN_HOME=$(cmd.exe /c "echo %USERPROFILE%" 2>/dev/null | tr -d '\r')
+  if [ -n "$WIN_HOME" ]; then
+    WSL_HOME=$(wslpath "$WIN_HOME" 2>/dev/null)
+    WSLCONFIG="$WSL_HOME/.wslconfig"
+    if ! grep -q "networkingMode=mirrored" "$WSLCONFIG" 2>/dev/null; then
+      echo "" >> "$WSLCONFIG" 2>/dev/null || true
+      printf "[wsl2]\nnetworkingMode=mirrored\n" >> "$WSLCONFIG"
+      echo "[✓] WSL2 mirrored networking enabled (restart WSL once: wsl --shutdown)"
+    else
+      echo "[✓] WSL2 mirrored networking already enabled"
+    fi
+  fi
+fi
+
 # ── Install Node dependencies (better-sqlite3 for loopback port discovery) ──
 echo "[*] Installing Node dependencies..."
 cd "$VIBE_DIR" && npm init -y > /dev/null 2>&1 && npm install better-sqlite3 --silent 2>/dev/null \
