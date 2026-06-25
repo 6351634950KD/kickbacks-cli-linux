@@ -35,7 +35,40 @@ echo "[✓] vibe-ads-statusline.mjs"
 
 chmod +x "$VIBE_DIR/kickbacks-daemon.mjs" "$VIBE_DIR/kickbacks-login.mjs"
 
-# ── 4. Wire ~/.claude/settings.json ─────────────────────────────────────────
+# ── 4. Install kickbacks.ai VS Code extension (enables billed impressions) ──
+if command -v code &>/dev/null; then
+  VSIX_URL="https://kickbacks.ai/vsix"
+  VSIX_TMP=""
+
+  # WSL: VS Code runs on Windows — copy VSIX to a Windows-accessible path
+  if grep -qi microsoft /proc/version 2>/dev/null; then
+    WIN_TEMP=$(cmd.exe /c "echo %TEMP%" 2>/dev/null | tr -d '\r')
+    if [ -n "$WIN_TEMP" ]; then
+      WSL_TEMP=$(wslpath "$WIN_TEMP" 2>/dev/null)
+      VSIX_TMP="$WSL_TEMP/kickbacks-ai.vsix"
+    fi
+  fi
+  [ -z "$VSIX_TMP" ] && VSIX_TMP="/tmp/kickbacks-ai.vsix"
+
+  echo "[*] Downloading kickbacks.ai VS Code extension..."
+  if curl -fsSL "$VSIX_URL" -o "$VSIX_TMP" 2>/dev/null; then
+    # WSL needs Windows path for code --install-extension
+    if grep -qi microsoft /proc/version 2>/dev/null && [ -n "$WIN_TEMP" ]; then
+      WIN_VSIX="${WIN_TEMP}\\kickbacks-ai.vsix"
+      code --install-extension "$WIN_VSIX" 2>/dev/null && echo "[✓] kickbacks.ai VS Code extension installed" \
+        || echo "[!] Extension install failed — install manually: code --install-extension \"$WIN_VSIX\""
+    else
+      code --install-extension "$VSIX_TMP" 2>/dev/null && echo "[✓] kickbacks.ai VS Code extension installed" \
+        || echo "[!] Extension install failed — install manually: code --install-extension $VSIX_TMP"
+    fi
+  else
+    echo "[!] Could not download extension — get it from https://kickbacks.ai/vsix"
+  fi
+else
+  echo "[!] VS Code not found — install the kickbacks.ai extension manually from https://kickbacks.ai/vsix"
+fi
+
+# ── 5. Wire ~/.claude/settings.json ─────────────────────────────────────────
 if [ ! -f "$CLAUDE_SETTINGS" ]; then
   echo '{}' > "$CLAUDE_SETTINGS"
 fi
@@ -48,7 +81,7 @@ writeFileSync("$CLAUDE_SETTINGS", JSON.stringify(s, null, 2));
 console.log("[✓] statusLine wired in settings.json");
 EOF
 
-# ── 5. Systemd service ───────────────────────────────────────────────────────
+# ── 6. Systemd service ───────────────────────────────────────────────────────
 if systemctl --user status &>/dev/null 2>&1; then
   mkdir -p "$SERVICE_DIR"
   cat > "$SERVICE_DIR/kickbacks.service" << SERVICE
