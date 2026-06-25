@@ -13,7 +13,7 @@ const CLIENT_FILE = join(VIBE_DIR, "client-id.txt");
 const CLI_AD_FILE = join(VIBE_DIR, "cli-ad.json");
 const SETTINGS    = join(HOME, ".claude", "settings.json");
 const SL_SCRIPT   = join(VIBE_DIR, "vibe-ads-statusline.mjs");
-const POLL_MS     = 10_000;
+const POLL_MS     = 2_000;
 const CC_VERSION  = "2.2.0";
 const EXT_VERSION = "0.3.177";  // matches current kickbacks.ai extension version
 
