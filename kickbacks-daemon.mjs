@@ -4,6 +4,7 @@ import { homedir, release as osRelease } from "node:os";
 import { join } from "node:path";
 import { randomUUID, randomBytes } from "node:crypto";
 import { execSync } from "node:child_process";
+import { createRequire } from "node:module";
 
 const BASE        = "https://kickbacks-backend-gmdaqm2c7q-uw.a.run.app";
 const HOME        = homedir();
@@ -15,9 +16,8 @@ const SETTINGS    = join(HOME, ".claude", "settings.json");
 const SL_SCRIPT   = join(VIBE_DIR, "vibe-ads-statusline.mjs");
 const POLL_MS     = 2_000;
 const CC_VERSION  = "2.2.0";
-const EXT_VERSION = "0.3.177";  // matches current kickbacks.ai extension version
+const EXT_VERSION = "0.3.177";
 
-// clientEnv mirrors the extension's MetricsClient.clientEnv() shape exactly.
 const CLIENT_ENV = {
   os: process.platform,
   arch: process.arch,
@@ -25,10 +25,57 @@ const CLIENT_ENV = {
   editor: "Visual Studio Code",
 };
 
-// Guard: only one tick() runs at a time, preventing concurrent cycles
-// that produce fraudulent-looking event patterns on the backend.
 let tickRunning = false;
 
+// ── Loopback discovery ────────────────────────────────────────────────────────
+// Reads the VS Code extension's loopback port+token from its SQLite globalState.
+// On WSL the DB lives on the Windows side; on Linux it's in ~/.config/Code.
+function getLoopback() {
+  const dbs = [
+    "/mnt/c/Users/" + process.env.USER + "/AppData/Roaming/Code/User/globalStorage/state.vscdb",
+    "/mnt/c/Users/Asus/AppData/Roaming/Code/User/globalStorage/state.vscdb",
+    join(HOME, ".config/Code/User/globalStorage/state.vscdb"),
+    join(HOME, "snap/code/common/.config/Code/User/globalStorage/state.vscdb"),
+  ];
+  for (const db of dbs) {
+    if (!existsSync(db)) continue;
+    try {
+      const req = createRequire(import.meta.url);
+      const sqlite3 = req("better-sqlite3");
+      const con = sqlite3(db, { readonly: true, fileMustExist: true });
+      const portRow = con.prepare(
+        "SELECT value FROM ItemTable WHERE key='kickbacksai.kickbacks-ai/kickbacks.loopback.port'"
+      ).get();
+      const tokenRow = con.prepare(
+        "SELECT value FROM ItemTable WHERE key='kickbacksai.kickbacks-ai/kickbacks.loopback.token'"
+      ).get();
+      con.close();
+      const port = portRow ? Number(portRow.value) : 0;
+      const token = tokenRow ? String(tokenRow.value) : "";
+      if (port > 0 && token) return { port, token };
+    } catch {}
+  }
+  return null;
+}
+
+// Send event through VS Code extension loopback (GET request, results in billed=true)
+async function sendViaLoopback(loopback, route, ad, nonce, visibleMs) {
+  const params = new URLSearchParams({
+    surface: "statusline",
+    ad: ad.adId,
+    session: nonce,
+    event_uuid: randomUUID(),
+    corr: `cli.${ad.adId}`,
+  });
+  if (visibleMs !== undefined) params.set("visible_ms", String(visibleMs));
+  const url = `http://127.0.0.1:${loopback.port}/vibe-ads/${loopback.token}/${route}?${params}`;
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(5_000) });
+    return r.status === 204;
+  } catch { return false; }
+}
+
+// ── Direct backend metric (fallback, billed=false) ────────────────────────────
 function loadTokens() {
   try { return JSON.parse(readFileSync(TOKENS_FILE, "utf8")); } catch { return null; }
 }
@@ -38,9 +85,6 @@ function saveTokens(t) {
 function getClientId() {
   if (existsSync(CLIENT_FILE)) return readFileSync(CLIENT_FILE, "utf8").trim();
   const id = randomUUID(); writeFileSync(CLIENT_FILE, id); return id;
-}
-function sessionNonce() {
-  return randomBytes(8).toString("hex");
 }
 async function safeFetch(url, opts = {}) {
   try { return await fetch(url, { signal: AbortSignal.timeout(15_000), ...opts }); } catch { return null; }
@@ -191,53 +235,43 @@ async function tick() {
     };
     writeFileSync(CLI_AD_FILE, JSON.stringify({ ...ad, ts: Date.now() }, null, 2));
     wireSettings(ad.adText);
-
     console.log(new Date().toISOString(), `Ad: "${ad.adText.slice(0, 60)}"`);
+    if (ad.adId !== lastAdId) { lastAdId = ad.adId; toastNotify(ad.adText, ad.clickUrl); }
 
-    if (ad.adId !== lastAdId) {
-      lastAdId = ad.adId;
-      toastNotify(ad.adText, ad.clickUrl);
-    }
-
-    // Per-cycle correlation IDs (in headers only — body ext = clientEnv)
+    // Try loopback first (billed=true), fall back to direct (billed=false)
+    const lb = getLoopback();
+    const nonce = randomBytes(8).toString("hex");
     const impCorr = `cli.${ad.adId}`;
 
-    // 1. Mark the impression as rendered
-    await sendMetric("impression_rendered", ad, tokens.access_token, clientId, {
-      corr: impCorr,
-    });
-
-    // 2. Immediately signal the impression is viewable (100% in-viewport)
-    await sendMetric("impression_viewable", ad, tokens.access_token, clientId, {
-      corr: impCorr,
-      view_pct: 100,
-    });
-
-    // 3. Six view_ticks at 5s intervals, accumulating visible_ms
-    for (let i = 1; i <= 6; i++) {
-      await new Promise(r => setTimeout(r, 5_000));
-      const visible_ms = i * 5_000;
-      const tickCorr = `clitick.${ad.adId}.${randomBytes(3).toString("hex")}`;
-      await sendMetric("view_tick", ad, tokens.access_token, clientId, {
-        corr: tickCorr,
-        visible_ms,
+    if (lb) {
+      console.log(new Date().toISOString(), `[loopback] port=${lb.port} — routing through extension`);
+      await sendViaLoopback(lb, "impression_rendered",  ad, nonce);
+      await sendViaLoopback(lb, "impression_viewable",  ad, nonce, 0);
+      for (let i = 1; i <= 6; i++) {
+        await new Promise(r => setTimeout(r, 5_000));
+        await sendViaLoopback(lb, "view_tick", ad, nonce, i * 5_000);
+      }
+      await sendViaLoopback(lb, "view_threshold_met", ad, nonce, 30_000);
+      console.log(new Date().toISOString(), "[loopback] cycle complete (billed=true expected)");
+    } else {
+      console.log(new Date().toISOString(), "[direct] loopback unavailable — sending direct (billed=false)");
+      await sendMetric("impression_rendered", ad, tokens.access_token, clientId, { corr: impCorr });
+      await sendMetric("impression_viewable", ad, tokens.access_token, clientId, { corr: impCorr, view_pct: 100 });
+      for (let i = 1; i <= 6; i++) {
+        await new Promise(r => setTimeout(r, 5_000));
+        const tickCorr = `clitick.${ad.adId}.${randomBytes(3).toString("hex")}`;
+        await sendMetric("view_tick", ad, tokens.access_token, clientId, { corr: tickCorr, visible_ms: i * 5_000 });
+      }
+      const finalCorr = `clitick.${ad.adId}.${randomBytes(3).toString("hex")}`;
+      await sendMetric("view_threshold_met", ad, tokens.access_token, clientId, {
+        corr: finalCorr, visible_ms: 30_000, view_pct: 100, view_ms: 30_000,
       });
     }
-
-    // 4. View threshold met (15s minimum reached at tick 3, completing all 6 = 30s)
-    const finalCorr = `clitick.${ad.adId}.${randomBytes(3).toString("hex")}`;
-    await sendMetric("view_threshold_met", ad, tokens.access_token, clientId, {
-      corr: finalCorr,
-      visible_ms: 30_000,
-      view_pct: 100,
-      view_ms: 30_000,
-    });
   } finally {
     tickRunning = false;
   }
 }
 
-// Random active session lengths and rest durations to mimic real usage patterns
 const SESSION_MINS = [5, 7, 10, 15, 30, 60];
 const REST_MINS    = [1, 2, 3, 4, 5, 6];
 
@@ -258,11 +292,10 @@ async function runSessionLoop() {
       await sleep(POLL_MS);
     }
 
-    console.log(new Date().toISOString(),
-      `Session ended — resting ${restMs/60000} min`);
+    console.log(new Date().toISOString(), `Session ended — resting ${restMs/60000} min`);
     await sleep(restMs);
   }
 }
 
-console.log("Kickbacks daemon running (random sessions)");
+console.log("Kickbacks daemon running (random sessions, loopback-aware)");
 runSessionLoop();

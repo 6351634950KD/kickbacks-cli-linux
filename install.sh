@@ -35,6 +35,13 @@ echo "[✓] vibe-ads-statusline.mjs"
 
 chmod +x "$VIBE_DIR/kickbacks-daemon.mjs" "$VIBE_DIR/kickbacks-login.mjs"
 
+# ── Install Node dependencies (better-sqlite3 for loopback port discovery) ──
+echo "[*] Installing Node dependencies..."
+cd "$VIBE_DIR" && npm init -y > /dev/null 2>&1 && npm install better-sqlite3 --silent 2>/dev/null \
+  && echo "[✓] Node dependencies installed" \
+  || echo "[!] npm install failed — loopback billing may not work"
+cd "$HOME"
+
 # ── 4. Install kickbacks.ai VS Code extension (enables billed impressions) ──
 if command -v code &>/dev/null; then
   VSIX_TMP=""
